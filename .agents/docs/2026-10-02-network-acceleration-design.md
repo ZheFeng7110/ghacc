@@ -230,13 +230,29 @@ asio = { version = "1.38.1", features = ["ssl"] }
 测试：`mcpp test`（accel 10 个 + ghacc 1 个）全绿，其中 `http_test` 覆盖报文编解码与分块，
 `engine_test` 用回环明文/TLS 上游验证反向代理、403 拦截、TLS MITM 证书链与请求日志。
 
-### 11.4 下一步
+### 11.4 M4（完成）
 
-- M4：`takeover.hosts`（标记块/备份/权限）、正向代理 CONNECT/absolute-URI（`engine.forward`）、
-  PAC、`takeover.system_proxy` 三平台
-- M5：CLI 子命令（cmdline）+ FTXUI 仪表盘
-- M3 未做：正向代理端口首字节 sniffing（普通 HTTP 与 CONNECT/TLS 共用端口）留待 M4；
-  `Tunnel` 规则当前按反向代理处理
+- `takeover.hosts`：标记块增删、首次备份、幂等、权限检测与提示、原子写。
+- `engine.types` / `engine.detail`：抽出反向/正向代理共用的 `EngineOptions`、`Pipeline`、
+  流工具、`connect_best`、`run_exchange`、`proxy_request`、`run_tunnel`。
+- `engine.forward`：正向代理端口——`CONNECT` 纯隧道、`CONNECT` + TLS 入侵、
+  absolute-URI 明文转发、proxy 端口首字节 sniffing（TLS 直连按 SNI 匹配）。
+- `engine.pac`：PAC 生成与请求识别，由正向代理监听在 `pac_path` 提供。
+- `takeover.system_proxy`：GNOME / KDE / macOS / Windows 四后端命令规划与执行，
+  可注入 Runner 便于测试。
+- 最小 CLI：`ghacc run --mode ...`、`ghacc hosts show|apply|revert`、`ghacc ca path|show|export`。
+- 测试新增：`hosts_test`、`pac_test`、`system_proxy_test`、`forward_test`（回环集成：
+  absolute-URI、CONNECT 隧道、CONNECT+TLS 入侵、403、PAC），`rule_test` 增补 `hostnames()`。
+- 端到端：`ghacc run --mode forward` + `curl -x` 经本地正向代理成功；hosts 模式在
+  无 root 时给出明确提权提示。
+
+### 11.5 下一步
+
+- M5：用 `mcpplibs.cmdline` 重写完整 CLI（含 `proxy set/clear`、`status --json`）+
+  FTXUI 仪表盘；替换当前手写解析。
+- hosts 模式的 root 端到端（绑定 80/443 + 写入 `/etc/hosts`）需在具备权限的机器手工验证。
+- 已知：反向代理的 `Tunnel` 规则仍按反向代理处理；“正向代理端口首字节 sniffing” 已在
+  M4 落地。
 
 ## 12. 已知限制
 

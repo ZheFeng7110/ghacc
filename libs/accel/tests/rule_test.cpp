@@ -78,5 +78,18 @@ int main() {
         expect(patterns.front() == std::string("api.example.com"));
     };
 
+    "hostnames keeps exact hosts and wildcard apexes"_test = [] {
+        RuleSet set;
+        set.add(make("github.com", "exact"));
+        set.add(make("*.github.com", "wild"));
+        set.add(make("*.githubusercontent.com", "wild"));
+        set.add(make("cdn?.example.com", "mid-wild"));
+        set.add(make(R"(re:^foo\d+\.com$)", "regex"));
+
+        const auto hosts = set.hostnames();
+        const std::vector<std::string> expected = {"github.com", "githubusercontent.com"};
+        expect(hosts == expected);
+    };
+
     return 0;
 }

@@ -82,6 +82,14 @@ public:
     /// Original patterns, in compiled order (used to build a PAC file).
     [[nodiscard]] std::vector<std::string> patterns() const;
 
+    /// Concrete host names that can be written to a hosts file.
+    ///
+    /// Exact patterns are returned verbatim; a simple `*.suffix` wildcard
+    /// contributes its apex `suffix` (hosts has no wildcard support). Regex
+    /// patterns and wildcards with `*`/`?` beyond a leading `*.` are skipped.
+    /// The result is lower-cased, de-duplicated and sorted.
+    [[nodiscard]] std::vector<std::string> hostnames() const;
+
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] bool empty() const noexcept { return size() == 0; }
 

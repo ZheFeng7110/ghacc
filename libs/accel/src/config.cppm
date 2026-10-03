@@ -26,6 +26,7 @@ struct ListenConfig {
     std::uint16_t proxy_port = 26501;  // forward proxy (System / PAC / ForwardOnly)
     std::uint16_t http_port = 80;      // reverse proxy (Hosts)
     std::uint16_t https_port = 443;    // MITM reverse proxy (Hosts)
+    std::string pac_path = "/pac";     // PAC path served by the forward proxy
 };
 
 struct DnsConfig {

@@ -131,6 +131,7 @@ std::expected<Config, std::string> parse_config(std::string_view toml_text) {
             static_cast<std::uint16_t>(get_int(*listen, "http_port", config.listen.http_port));
         config.listen.https_port =
             static_cast<std::uint16_t>(get_int(*listen, "https_port", config.listen.https_port));
+        config.listen.pac_path = get_string(*listen, "pac_path", config.listen.pac_path);
     }
 
     if (auto* dns = root["dns"].as_table()) {
@@ -186,6 +187,7 @@ std::string to_toml(const Config& config) {
     listen.insert("proxy_port", static_cast<std::int64_t>(config.listen.proxy_port));
     listen.insert("http_port", static_cast<std::int64_t>(config.listen.http_port));
     listen.insert("https_port", static_cast<std::int64_t>(config.listen.https_port));
+    listen.insert("pac_path", config.listen.pac_path);
     root.insert("listen", std::move(listen));
 
     toml::table dns;

@@ -7,26 +7,14 @@ import ghacc.accel.flow;
 import ghacc.accel.rule;
 import ghacc.accel.ca.authority;
 
+// EngineOptions / Pipeline / ExchangeMeta live in a shared module so the
+// reverse- and forward-proxy implementations can both depend on them.
+export import ghacc.accel.engine.types;
+
 export namespace ghacc::accel {
 
-/// Runtime options for the local proxy engine.
-struct EngineOptions {
-    ProxyMode mode = ProxyMode::Hosts;
-    std::string listen_address = "127.0.0.1";
-    /// Ports the engine listens on for the Hosts/MITM reverse proxy.
-    std::uint16_t http_port = 80;
-    std::uint16_t https_port = 443;
-    /// Forward-proxy port (System/PAC/ForwardOnly; used from M4 on).
-    std::uint16_t proxy_port = 26501;
-    /// Upstream ports used when the reverse proxy connects out.
-    std::uint16_t upstream_http_port = 80;
-    std::uint16_t upstream_https_port = 443;
-    bool enable_http = true;
-    bool enable_https = true;
-    /// Verify upstream certificates. Tests may disable this for self-signed hosts.
-    bool upstream_tls_verify = true;
-    DnsConfig dns;
-};
+/// Map a user `Config` onto engine listening options (mode -> listeners).
+[[nodiscard]] EngineOptions engine_options_from_config(const Config& config);
 
 /// Local reverse-proxy / MITM engine.
 ///

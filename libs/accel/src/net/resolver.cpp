@@ -223,6 +223,12 @@ DnsResolver::DnsResolver(DnsConfig config) : config_(std::move(config)) {}
 std::vector<asio::ip::address> DnsResolver::resolve_uncached(std::string_view host) {
     std::vector<asio::ip::address> addresses;
 
+    // A literal address needs no DNS (and DoH cannot resolve an IP anyway).
+    if (std::error_code literal_ec; true) {
+        auto literal = asio::ip::make_address(std::string(host), literal_ec);
+        if (!literal_ec) return {literal};
+    }
+
     for (const auto& url : config_.doh) {
         auto endpoint = parse_endpoint(url);
         if (!endpoint) continue;

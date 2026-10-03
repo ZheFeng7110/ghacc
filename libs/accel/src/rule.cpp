@@ -178,6 +178,31 @@ std::vector<std::string> RuleSet::patterns() const {
     return out;
 }
 
+std::vector<std::string> RuleSet::hostnames() const {
+    impl_->sort_if_needed();
+    std::vector<std::string> out;
+    out.reserve(impl_->rules.size());
+    for (const auto& c : impl_->rules) {
+        switch (c.kind) {
+            case RuleMatch::Exact:
+                out.push_back(c.pattern);
+                break;
+            case RuleMatch::Wildcard:
+                // Only a leading `*.` with no further wildcard maps to a host.
+                if (c.pattern.starts_with("*.") &&
+                    c.pattern.find_first_of("*?", 2) == std::string::npos) {
+                    out.push_back(c.pattern.substr(2));
+                }
+                break;
+            case RuleMatch::Regex:
+                break;
+        }
+    }
+    std::ranges::sort(out);
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
 std::size_t RuleSet::size() const noexcept { return impl_->rules.size(); }
 
 } // namespace ghacc::accel
