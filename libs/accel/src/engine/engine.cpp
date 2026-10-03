@@ -54,7 +54,7 @@ asio::awaitable<void> serve_reverse(Pipeline& p, ClientStream& client, bool clie
         co_return;
     }
 
-    const auto rule = p.rules.match(host);
+    const auto rule = p.rules->match(host);
     if (rule && rule->action == RuleAction::Block) {
         log_info("engine", "blocked " + host);
         co_await send_error(client, 403, "Forbidden");
@@ -77,7 +77,7 @@ asio::awaitable<void> serve_reverse(Pipeline& p, ClientStream& client, bool clie
 struct ProxyEngine::Impl {
     asio::io_context& io;
     EngineOptions options;
-    RuleSet rules;
+    std::shared_ptr<RuleSet> rules;
     CertificateAuthority* ca;
     FlowAnalyzer* flow;
     RequestLog* requests;
@@ -95,7 +95,7 @@ struct ProxyEngine::Impl {
          CertificateAuthority& authority, FlowAnalyzer& analyzer, RequestLog& log)
         : io(context),
           options(std::move(opts)),
-          rules(std::move(rule_set)),
+          rules(std::make_shared<RuleSet>(std::move(rule_set))),
           ca(&authority),
           flow(&analyzer),
           requests(&log),
@@ -312,6 +312,13 @@ void ProxyEngine::request_stop() {
         }
         if (impl->stop_timer) impl->stop_timer->cancel();
     });
+}
+
+void ProxyEngine::update_rules(RuleSet rules) {
+    auto* impl = impl_.get();
+    auto snapshot = std::make_shared<RuleSet>(std::move(rules));
+    asio::post(impl->io,
+               [impl, snapshot = std::move(snapshot)]() mutable { impl->rules = std::move(snapshot); });
 }
 
 bool ProxyEngine::running() const noexcept {

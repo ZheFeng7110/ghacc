@@ -71,4 +71,25 @@ struct Config {
 /// Platform default path: `<config_dir>/ghacc/config.toml`.
 [[nodiscard]] std::filesystem::path default_config_path();
 
+/// Platform data directory (leaf certificate cache, ...).
+[[nodiscard]] std::filesystem::path default_data_dir();
+
+/// Platform state directory (PID file, hosts backup, ...).
+[[nodiscard]] std::filesystem::path default_state_dir();
+
+/// Platform log directory.
+[[nodiscard]] std::filesystem::path default_log_dir();
+
+/// Default CA directory: the config directory with a `ca/` child.
+[[nodiscard]] std::filesystem::path default_ca_dir();
+
+/// Default daemon PID file: `<state_dir>/ghacc.pid`.
+[[nodiscard]] std::filesystem::path default_pid_path();
+
+/// Default log file: `<log_dir>/ghacc.log`.
+[[nodiscard]] std::filesystem::path default_log_path();
+
+/// Default leaf-certificate cache: `<data_dir>/certs`.
+[[nodiscard]] std::filesystem::path default_cert_cache_dir();
+
 } // namespace ghacc::accel

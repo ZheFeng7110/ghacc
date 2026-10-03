@@ -42,6 +42,11 @@ public:
     /// Ask the engine to stop accepting; safe to call from any thread.
     void request_stop();
 
+    /// Replace the rule set used by subsequent connections. In-flight
+    /// connections keep the snapshot they were accepted with. Safe to call
+    /// from any thread (the swap is marshalled onto the io_context).
+    void update_rules(RuleSet rules);
+
     [[nodiscard]] bool running() const noexcept;
 
     /// Actual bound ports, in listener order (useful with port 0 in tests).

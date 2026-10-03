@@ -27,14 +27,6 @@ std::optional<ProxyMode> proxy_mode_from(std::string_view text) noexcept {
 
 namespace {
 
-std::optional<LogLevel> log_level_from(std::string_view text) noexcept {
-    if (text == "debug") return LogLevel::Debug;
-    if (text == "info") return LogLevel::Info;
-    if (text == "warn" || text == "warning") return LogLevel::Warn;
-    if (text == "error") return LogLevel::Error;
-    return std::nullopt;
-}
-
 template <class T>
 std::optional<T> get_value(const toml::table& table, std::string_view key) {
     if (auto value = table[key].value<T>()) return value;
@@ -260,27 +252,111 @@ std::expected<void, std::string> save_config(const std::filesystem::path& path,
     return {};
 }
 
+namespace {
+
+std::filesystem::path env_path(const char* name) {
+    if (const char* value = std::getenv(name); value != nullptr && *value != '\0') {
+        return std::filesystem::path(value);
+    }
+    return {};
+}
+
+std::filesystem::path home_dir() {
+    if (auto home = env_path("HOME"); !home.empty()) return home;
+#if defined(_WIN32)
+    if (auto profile = env_path("USERPROFILE"); !profile.empty()) return profile;
+#endif
+    return {};
+}
+
+/// `<base>/ghacc` with a sensible fallback to a relative directory.
+std::filesystem::path under(const std::filesystem::path& base) {
+    if (base.empty()) return std::filesystem::path("ghacc");
+    return base / "ghacc";
+}
+
+} // namespace
+
 std::filesystem::path default_config_path() {
 #if defined(_WIN32)
-    if (const char* appdata = std::getenv("APPDATA"); appdata != nullptr) {
-        return std::filesystem::path(appdata) / "ghacc" / "config.toml";
+    if (auto appdata = env_path("APPDATA"); !appdata.empty()) {
+        return appdata / "ghacc" / "config.toml";
     }
     return std::filesystem::path("ghacc") / "config.toml";
 #elif defined(__APPLE__)
-    if (const char* home = std::getenv("HOME"); home != nullptr) {
-        return std::filesystem::path(home) / "Library" / "Application Support" / "ghacc" /
-               "config.toml";
+    if (auto home = home_dir(); !home.empty()) {
+        return home / "Library" / "Application Support" / "ghacc" / "config.toml";
     }
     return std::filesystem::path("ghacc") / "config.toml";
 #else
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg != nullptr && *xdg != '\0') {
-        return std::filesystem::path(xdg) / "ghacc" / "config.toml";
+    if (auto xdg = env_path("XDG_CONFIG_HOME"); !xdg.empty()) {
+        return xdg / "ghacc" / "config.toml";
     }
-    if (const char* home = std::getenv("HOME"); home != nullptr) {
-        return std::filesystem::path(home) / ".config" / "ghacc" / "config.toml";
+    if (auto home = home_dir(); !home.empty()) {
+        return home / ".config" / "ghacc" / "config.toml";
     }
     return std::filesystem::path("ghacc") / "config.toml";
 #endif
+}
+
+std::filesystem::path default_data_dir() {
+#if defined(_WIN32)
+    if (auto local = env_path("LOCALAPPDATA"); !local.empty()) return local / "ghacc";
+    return std::filesystem::path("ghacc");
+#elif defined(__APPLE__)
+    if (auto home = home_dir(); !home.empty()) {
+        return home / "Library" / "Application Support" / "ghacc";
+    }
+    return std::filesystem::path("ghacc");
+#else
+    if (auto xdg = env_path("XDG_DATA_HOME"); !xdg.empty()) return xdg / "ghacc";
+    return under(home_dir() / ".local" / "share");
+#endif
+}
+
+std::filesystem::path default_state_dir() {
+#if defined(_WIN32)
+    if (auto local = env_path("LOCALAPPDATA"); !local.empty()) return local / "ghacc";
+    return std::filesystem::path("ghacc");
+#elif defined(__APPLE__)
+    if (auto home = home_dir(); !home.empty()) {
+        return home / "Library" / "Application Support" / "ghacc";
+    }
+    return std::filesystem::path("ghacc");
+#else
+    if (auto xdg = env_path("XDG_STATE_HOME"); !xdg.empty()) return xdg / "ghacc";
+    return under(home_dir() / ".local" / "state");
+#endif
+}
+
+std::filesystem::path default_log_dir() {
+#if defined(_WIN32)
+    if (auto local = env_path("LOCALAPPDATA"); !local.empty()) return local / "ghacc" / "logs";
+    return std::filesystem::path("ghacc") / "logs";
+#elif defined(__APPLE__)
+    if (auto home = home_dir(); !home.empty()) return home / "Library" / "Logs" / "ghacc";
+    return std::filesystem::path("ghacc") / "logs";
+#else
+    // On Linux logs live under the XDG state directory, which is where
+    // applications are expected to keep state that outlives a reboot.
+    return default_state_dir();
+#endif
+}
+
+std::filesystem::path default_ca_dir() {
+    return default_config_path().parent_path() / "ca";
+}
+
+std::filesystem::path default_pid_path() {
+    return default_state_dir() / "ghacc.pid";
+}
+
+std::filesystem::path default_log_path() {
+    return default_log_dir() / "ghacc.log";
+}
+
+std::filesystem::path default_cert_cache_dir() {
+    return default_data_dir() / "certs";
 }
 
 } // namespace ghacc::accel

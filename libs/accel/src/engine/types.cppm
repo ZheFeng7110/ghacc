@@ -41,8 +41,12 @@ struct EngineOptions {
 };
 
 /// Shared state handed to the per-connection serving coroutines.
+///
+/// `rules` is a snapshot shared with the engine; replacing the engine's rules
+/// leaves in-flight connections on the old set while new connections pick up
+/// the new one.
 struct Pipeline {
-    RuleSet& rules;
+    std::shared_ptr<const RuleSet> rules;
     DnsResolver& resolver;
     FlowAnalyzer& flow;
     RequestLog& requests;

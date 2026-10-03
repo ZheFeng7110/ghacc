@@ -37,7 +37,7 @@ PacOptions pac_options(const Pipeline& p) {
 }
 
 asio::awaitable<void> serve_pac(tcp::socket& socket, Pipeline& p) {
-    const std::string body = generate_pac(p.rules, pac_options(p));
+    const std::string body = generate_pac(*p.rules, pac_options(p));
     http::Response response;
     response.status = 200;
     response.reason = "OK";
@@ -85,7 +85,7 @@ asio::awaitable<void> handle_connect(Pipeline& p, tcp::socket socket, std::strin
         co_return;
     }
 
-    auto rule = p.rules.match(host);
+    auto rule = p.rules->match(host);
     if (rule && rule->action == RuleAction::Block) {
         log_info("forward", "blocked CONNECT " + authority);
         co_await send_error(socket, 403, "Forbidden");
@@ -190,7 +190,7 @@ asio::awaitable<void> handle_http(Pipeline& p, tcp::socket socket, std::string b
     request.target = to_origin_form(target, target_https);
     request.headers.set("Host", authority);
 
-    auto rule = p.rules.match(host);
+    auto rule = p.rules->match(host);
     if (rule && rule->action == RuleAction::Block) {
         log_info("forward", "blocked " + host);
         co_await send_error(socket, 403, "Forbidden");
@@ -218,7 +218,7 @@ asio::awaitable<void> handle_direct_tls(Pipeline& p, tcp::socket socket,
     const std::string sni = sni_raw != nullptr ? lower_copy(sni_raw) : "";
     if (sni.empty()) co_return;
 
-    auto rule = p.rules.match(sni);
+    auto rule = p.rules->match(sni);
     if (!rule || rule->action != RuleAction::ReverseProxy || !rule->tls_sni) {
         log_debug("forward", "unmatched direct TLS SNI " + sni);
         co_return;

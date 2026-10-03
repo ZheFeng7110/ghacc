@@ -16,6 +16,7 @@ export import ghacc.accel.engine.pac;
 export import ghacc.accel.engine.forward;
 export import ghacc.accel.takeover.hosts;
 export import ghacc.accel.takeover.system_proxy;
+export import ghacc.accel.takeover.ca_trust;
 export import ghacc.accel.log;
 export import ghacc.accel.provider;
 export import ghacc.accel.provider.github;

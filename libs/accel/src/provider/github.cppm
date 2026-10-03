@@ -26,10 +26,14 @@ public:
         static constexpr std::string_view patterns[] = {
             "github.com",
             "*.github.com",
+            "api.github.com",
+            "gist.github.com",
+            "codeload.github.com",
             "github.io",
             "*.github.io",
             "githubassets.com",
             "*.githubassets.com",
+            "githubusercontent.com",
             "*.githubusercontent.com",
             "raw.githubusercontent.com",
             "objects.githubusercontent.com",
@@ -37,6 +41,7 @@ public:
             "camo.githubusercontent.com",
             "avatars.githubusercontent.com",
             "user-images.githubusercontent.com",
+            "media.githubusercontent.com",
             "github.global.ssl.fastly.net",
             "github.map.fastly.net",
         };
