@@ -219,6 +219,17 @@ cd tests/e2e && uv run pytest
 端到端套件不触碰 80/443、真实 `/etc/hosts` 或系统代理；详见
 [`tests/e2e/README.md`](tests/e2e/README.md)。
 
+## 持续集成
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 GitHub Actions 上运行：
+
+- **三平台构建验证**（`ubuntu-24.04` / `macos-14` / `windows-latest`）：安装 mcpp、构建
+  workspace、运行 `libs/accel` 与 `apps/ghacc` 的单元测试，并做 CLI 冒烟测试。
+- **端到端测试**（Linux）：构建后运行 `tests/e2e` 的 pytest 套件。
+- **打包**（Linux）：`mcpp pack --mode self-contained`，产物作为 CI artifact 上传。
+
+第三方依赖（OpenSSL / FTXUI 等）编译结果按 `mcpp.lock` 哈希缓存到 `~/.mcpp`。
+
 ## 打包
 
 ```sh

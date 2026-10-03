@@ -1,0 +1,123 @@
+name: CI
+
+# Three-platform build verification plus the automated test suites:
+#
+#   build-test  builds and runs the C++ unit tests on Linux, macOS and Windows
+#   e2e         builds once and drives the real binary with the pytest suite
+#   package     produces a self-contained Linux bundle with `mcpp pack`
+#
+# The heavy third-party dependencies (compat.openssl, compat.ftxui, ...) are
+# compiled once and cached under ~/.mcpp by the shared setup-mcpp action.
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-14
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mcpp
+
+      - name: Build workspace
+        shell: bash
+        run: '"$MCPP" build'
+
+      - name: Unit tests — accel library
+        shell: bash
+        working-directory: libs/accel
+        run: '"$MCPP" test'
+
+      - name: Unit tests — application
+        shell: bash
+        working-directory: apps/ghacc
+        run: '"$MCPP" test'
+
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$(find target -type f \( -name ghacc -o -name ghacc.exe \) -path '*/bin/*' | sort | head -1)"
+          test -n "$BIN"
+          echo "binary: $BIN"
+          "$BIN" version
+          "$BIN" help >/dev/null
+          "$BIN" status --json --dir "$RUNNER_TEMP/ghacc-ca" >/dev/null
+
+  e2e:
+    name: End-to-end (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mcpp
+
+      - name: Build workspace
+        shell: bash
+        run: '"$MCPP" build'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run the pytest suite
+        shell: bash
+        working-directory: tests/e2e
+        run: |
+          set -euo pipefail
+          BIN="$(find "$GITHUB_WORKSPACE/target" -type f -name ghacc -path '*/bin/*' | sort | head -1)"
+          test -n "$BIN"
+          echo "GHACC_BIN=$BIN"
+          GHACC_BIN="$BIN" uv run pytest -q
+
+  package:
+    name: Package (Linux, self-contained)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mcpp
+
+      - name: Build and pack
+        shell: bash
+        working-directory: apps/ghacc
+        run: '"$MCPP" pack --mode self-contained'
+
+      - name: Smoke-test the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="$(find apps/ghacc/target/dist -name 'ghacc-*.tar.gz' | head -1)"
+          test -n "$ARCHIVE"
+          DEST="$RUNNER_TEMP/ghacc-bundle"
+          mkdir -p "$DEST"
+          tar -xzf "$ARCHIVE" -C "$DEST"
+          WRAPPER="$(find "$DEST" -maxdepth 2 -type f -name ghacc | head -1)"
+          test -n "$WRAPPER"
+          "$WRAPPER" version
+
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghacc-linux-x86_64
+          path: apps/ghacc/target/dist/ghacc-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14

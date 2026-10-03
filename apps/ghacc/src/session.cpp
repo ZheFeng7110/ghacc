@@ -66,7 +66,11 @@ struct EngineSession::Impl {
         if (stopping.exchange(true)) return;
         if (watcher.joinable()) watcher.request_stop();
         std::error_code ignored;
-        signals.cancel(ignored);
+        try {
+            signals.cancel(ignored);
+        } catch (const std::exception&) {
+            // asio signal_set is not supported on every platform.
+        }
         if (engine) engine->request_stop();
         io.stop();
         if (worker.joinable()) worker.join();
@@ -74,13 +78,19 @@ struct EngineSession::Impl {
     }
 
     void handle_signals() {
-        signals.add(SIGINT);
-        signals.add(SIGTERM);
-        signals.async_wait([this](const std::error_code& ec, int) {
-            if (ec) return;
-            log_info("session", "stop requested");
-            if (engine) engine->request_stop();
-        });
+        try {
+            signals.add(SIGINT);
+            signals.add(SIGTERM);
+            signals.async_wait([this](const std::error_code& ec, int) {
+                if (ec) return;
+                log_info("session", "stop requested");
+                if (engine) engine->request_stop();
+            });
+        } catch (const std::exception& error) {
+            // asio signal_set is not available on every platform (e.g. Windows);
+            // the CLI simply cannot be interrupted with Ctrl-C there.
+            log_debug("session", std::string("signal handling unavailable: ") + error.what());
+        }
     }
 
     void wait() {

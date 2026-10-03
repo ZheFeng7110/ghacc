@@ -221,6 +221,19 @@ cd tests/e2e && uv run pytest
 The end-to-end suite never touches ports 80/443, the real `/etc/hosts`, or the system proxy; see
 [`tests/e2e/README_en.md`](tests/e2e/README_en.md).
 
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on GitHub Actions:
+
+- **Three-platform build verification** (`ubuntu-24.04` / `macos-14` / `windows-latest`): install
+  mcpp, build the workspace, run the `libs/accel` and `apps/ghacc` unit tests, and smoke-test the
+  CLI.
+- **End-to-end** (Linux): build once, then run the `tests/e2e` pytest suite.
+- **Package** (Linux): `mcpp pack --mode self-contained`, uploaded as a CI artifact.
+
+Compiled third-party dependencies (OpenSSL, FTXUI, ...) are cached under `~/.mcpp`, keyed by the
+`mcpp.lock` hash.
+
 ## Packaging
 
 ```sh
