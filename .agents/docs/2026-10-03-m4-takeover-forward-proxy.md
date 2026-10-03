@@ -156,6 +156,14 @@ pac_path = "/pac"
 - 手工：`ghacc run --mode forward` 后 `curl -x http://127.0.0.1:26501 http://...`；
   hosts 模式需 root，绑定 80/443 并写入 `/etc/hosts`。
 
+工程化的端到端套件位于 `tests/e2e/`（uv 管理的 Python 工程 + pytest）：用真实 `ghacc`
+进程 + 回环上游服务器覆盖 absolute-URI、CONNECT 隧道、PAC、TLS 入侵、Block、hosts 标记块、
+CA 导出与基础 CLI。运行方式：
+
+```sh
+cd tests/e2e && uv run pytest     # 或 GHACC_BIN=/path/to/ghacc uv run pytest
+```
+
 所有自动化测试不触碰 80/443、`/etc/hosts` 或系统代理。
 
 ## 已知限制
