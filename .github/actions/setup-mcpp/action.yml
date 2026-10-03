@@ -1,78 +1,65 @@
 name: Setup mcpp
 description: >-
-  Install the released mcpp (via xlings), point it at the GLOBAL mirror and
-  export the resolved binary as $MCPP.
-
-inputs:
-  xlings-version:
-    description: Pinned xlings version used to bootstrap the package manager.
-    required: false
-    default: v2026.9.30.1
+  Install the pinned mcpp release directly from GitHub Releases (sha256
+  verified) and point it at the GLOBAL mirror. The calling workflow declares
+  `MCPP_VERSION`; the resolved binary is exported as $MCPP.
 
 runs:
   using: composite
 
   steps:
-    - name: Install xlings (Linux / macOS)
-      if: runner.os != 'Windows'
+    # mcpp keeps toolchains and built dependencies under ~/.mcpp; restoring it
+    # turns the first (slow) OpenSSL/FTXUI build into a cache hit. Restored
+    # before the install so a cached payload never shadows the pinned release.
+    - name: Cache mcpp payloads
+      uses: actions/cache@v6
+      with:
+        path: ~/.mcpp
+        key: mcpp-${{ runner.os }}-v${{ env.MCPP_VERSION }}-${{ hashFiles('mcpp.toml', 'mcpp.lock', 'libs/accel/mcpp.toml', 'apps/ghacc/mcpp.toml') }}
+        restore-keys: |
+          mcpp-${{ runner.os }}-v${{ env.MCPP_VERSION }}-
+
+    - name: Install mcpp
       shell: bash
-      env:
-        XLINGS_NON_INTERACTIVE: '1'
       run: |
         set -euo pipefail
-        curl -fsSL \
-          https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh \
-          | bash -s ${{ inputs.xlings-version }}
-        echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+        VER="${{ env.MCPP_VERSION }}"
+        case "$RUNNER_OS" in
+          Linux)   PLAT="linux-x86_64";   EXT="tar.gz" ;;
+          macOS)   PLAT="macosx-arm64";   EXT="tar.gz" ;;
+          Windows) PLAT="windows-x86_64"; EXT="zip"    ;;
+          *) echo "unsupported runner os: $RUNNER_OS"; exit 1 ;;
+        esac
+        BASE="https://github.com/mcpp-community/mcpp/releases/download/v${VER}"
 
-    - name: Install xlings (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      env:
-        XLINGS_NON_INTERACTIVE: '1'
-      run: |
-        $ErrorActionPreference = 'Stop'
-        irm https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.ps1 | iex
-        "$env:USERPROFILE\.xlings\subos\current\bin" |
-          Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
-
-    - name: Install mcpp and configure the GLOBAL mirror
-      shell: bash
-      env:
-        XLINGS_NON_INTERACTIVE: '1'
-      run: |
-        set -euo pipefail
-        export PATH="$HOME/.xlings/subos/current/bin:$PATH"
-
-        # Keep the package index current, then install the released client.
-        xlings update || true
-        xlings install mcpp -y
-
-        # Resolve the real mcpp binary. On POSIX the shim on PATH is an
-        # executable symlink; on Windows it may only exist as `mcpp.exe`, so
-        # fall back to searching the payload directories.
-        MCPP="$(command -v mcpp || true)"
-        if [ -z "${MCPP}" ] || [ ! -x "${MCPP}" ]; then
-          MCPP="$(find "$HOME/.xlings/data/xpkgs" "$HOME/.mcpp/registry/data/xpkgs" \
-                    -type f \( -name mcpp -o -name mcpp.exe \) 2>/dev/null \
-                  | sort -V | tail -1)"
+        WORK=$(mktemp -d)
+        curl -fsSL -o "$WORK/mcpp.$EXT"        "$BASE/mcpp-${VER}-${PLAT}.${EXT}"
+        curl -fsSL -o "$WORK/mcpp.$EXT.sha256" "$BASE/mcpp-${VER}-${PLAT}.${EXT}.sha256"
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual=$(sha256sum "$WORK/mcpp.$EXT" | awk '{print $1}')
+        else
+          actual=$(shasum -a 256 "$WORK/mcpp.$EXT" | awk '{print $1}')
         fi
-        test -n "${MCPP}"
-        test -x "${MCPP}"
+        expected=$(awk '{print $1}' "$WORK/mcpp.$EXT.sha256")
+        test "$actual" = "$expected" || { echo "sha256 mismatch"; exit 1; }
+        echo "mcpp ${VER} ${PLAT} sha256 verified"
+
+        mkdir -p "$HOME/.mcpp"
+        case "$EXT" in
+          tar.gz) tar -xzf "$WORK/mcpp.$EXT" -C "$HOME/.mcpp" --strip-components=1 ;;
+          zip)
+            unzip -q "$WORK/mcpp.$EXT" -d "$WORK/zip"
+            # The zip has a single wrapper directory (mcpp-<ver>-<plat>/...).
+            cp -R "$WORK/zip"/*/* "$HOME/.mcpp/"
+            ;;
+        esac
+        rm -rf "$WORK"
+
+        echo "$HOME/.mcpp/bin" >> "$GITHUB_PATH"
 
         # GitHub-hosted runners are outside CN: fetch dependencies from the
         # global (GitHub) mirror.
-        "${MCPP}" self config --mirror GLOBAL
-        "${MCPP}" --version
+        "$HOME/.mcpp/bin/mcpp" self config --mirror GLOBAL
+        "$HOME/.mcpp/bin/mcpp" --version
 
-        echo "MCPP=${MCPP}" >> "$GITHUB_ENV"
-
-    # mcpp keeps toolchains and built dependencies under ~/.mcpp; restoring it
-    # turns the first (slow) OpenSSL/FTXUI build into a cache hit.
-    - name: Cache mcpp payloads
-      uses: actions/cache@v4
-      with:
-        path: ~/.mcpp
-        key: mcpp-${{ runner.os }}-${{ hashFiles('mcpp.toml', 'mcpp.lock', 'libs/accel/mcpp.toml', 'apps/ghacc/mcpp.toml') }}
-        restore-keys: |
-          mcpp-${{ runner.os }}-
+        echo "MCPP=$HOME/.mcpp/bin/mcpp" >> "$GITHUB_ENV"

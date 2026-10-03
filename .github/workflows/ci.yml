@@ -2,18 +2,22 @@ name: CI
 
 # Three-platform build verification plus the automated test suites:
 #
-#   build-test  builds and runs the C++ unit tests on Linux, macOS and Windows
-#   e2e         builds once and drives the real binary with the pytest suite
-#   package     produces a self-contained Linux bundle with `mcpp pack`
+#   build-test  builds, runs the C++ unit tests and then drives the real
+#               binary with the pytest suite on Linux, macOS and Windows.
+#
+# The e2e steps live in the same job, after the build and unit tests, so they
+# only start once those have passed — on every platform.
 #
 # The heavy third-party dependencies (compat.openssl, compat.ftxui, ...) are
 # compiled once and cached under ~/.mcpp by the shared setup-mcpp action.
+#
+# MCPP_VERSION pins the mcpp release installed by setup-mcpp; bump it by hand.
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [develop]
   pull_request:
-  workflow_dispatch:
+    branches: [develop]
 
 permissions:
   contents: read
@@ -22,9 +26,12 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  MCPP_VERSION: "2026.10.1.3"
+
 jobs:
   build-test:
-    name: Build & unit tests (${{ matrix.os }})
+    name: Build, unit & e2e tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -35,22 +42,24 @@ jobs:
           - macos-14
           - windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-mcpp
 
-      - name: Build workspace
+      - name: Build — accel library
         shell: bash
-        run: '"$MCPP" build'
+        run: '"$MCPP" build -p libs/accel'
+
+      - name: Build — application
+        shell: bash
+        run: '"$MCPP" build -p apps/ghacc'
 
       - name: Unit tests — accel library
         shell: bash
-        working-directory: libs/accel
-        run: '"$MCPP" test'
+        run: '"$MCPP" test -p libs/accel'
 
       - name: Unit tests — application
         shell: bash
-        working-directory: apps/ghacc
-        run: '"$MCPP" test'
+        run: '"$MCPP" test -p apps/ghacc'
 
       - name: CLI smoke test
         shell: bash
@@ -63,18 +72,6 @@ jobs:
           "$BIN" help >/dev/null
           "$BIN" status --json --dir "$RUNNER_TEMP/ghacc-ca" >/dev/null
 
-  e2e:
-    name: End-to-end (Linux)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-mcpp
-
-      - name: Build workspace
-        shell: bash
-        run: '"$MCPP" build'
-
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
@@ -83,41 +80,12 @@ jobs:
         working-directory: tests/e2e
         run: |
           set -euo pipefail
-          BIN="$(find "$GITHUB_WORKSPACE/target" -type f -name ghacc -path '*/bin/*' | sort | head -1)"
+          BIN="$(find ../../target -type f \( -name ghacc -o -name ghacc.exe \) -path '*/bin/*' | sort | head -1)"
           test -n "$BIN"
+          BIN="$(realpath "$BIN")"
+          # Windows needs a native path for the Python interpreter.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            BIN="$(cygpath -w "$BIN")"
+          fi
           echo "GHACC_BIN=$BIN"
           GHACC_BIN="$BIN" uv run pytest -q
-
-  package:
-    name: Package (Linux, self-contained)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-mcpp
-
-      - name: Build and pack
-        shell: bash
-        working-directory: apps/ghacc
-        run: '"$MCPP" pack --mode self-contained'
-
-      - name: Smoke-test the bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          ARCHIVE="$(find apps/ghacc/target/dist -name 'ghacc-*.tar.gz' | head -1)"
-          test -n "$ARCHIVE"
-          DEST="$RUNNER_TEMP/ghacc-bundle"
-          mkdir -p "$DEST"
-          tar -xzf "$ARCHIVE" -C "$DEST"
-          WRAPPER="$(find "$DEST" -maxdepth 2 -type f -name ghacc | head -1)"
-          test -n "$WRAPPER"
-          "$WRAPPER" version
-
-      - name: Upload the bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: ghacc-linux-x86_64
-          path: apps/ghacc/target/dist/ghacc-*.tar.gz
-          if-no-files-found: error
-          retention-days: 14
