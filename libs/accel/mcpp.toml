@@ -1,0 +1,33 @@
+[package]
+namespace   = "ghacc"
+name        = "accel"
+version     = "0.1.0"
+description = "ghacc network acceleration engine"
+license     = "MIT"
+standard    = "c++23"
+
+[targets.accel]
+kind = "lib"
+
+# NOTE: `features` is NOT inherited through `.workspace = true` (mcpp copies
+# only the version/source), so asio is declared with its full spec here.
+[dependencies.chriskohlhoff]
+asio = { workspace = true, features = ["ssl"] }
+
+[dependencies.compat]
+openssl.workspace = true
+
+[dependencies]
+marzer.tomlplusplus.workspace = true
+
+[dev-dependencies.boost-ext]
+ut.workspace = true
+
+[target.'cfg(linux)'.build]
+ldflags = ["-lpthread", "-ldl"]
+
+[target.'cfg(macos)'.build]
+ldflags = ["-lpthread"]
+
+[target.'cfg(windows)'.build]
+ldflags = ["-lws2_32", "-liphlpapi", "-lcrypt32"]

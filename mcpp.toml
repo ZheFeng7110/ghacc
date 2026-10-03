@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "libs/accel",
+    "apps/ghacc",
+]
+
+[workspace.dependencies]
+mcpplibs.cmdline    = "0.0.2"
+marzer.tomlplusplus = "3.4.0"
+
+[workspace.dependencies.chriskohlhoff]
+asio = { version = "1.38.1", features = ["ssl"] }
+
+[workspace.dependencies.compat]
+openssl = "3.5.1"
+ftxui   = { version = "7.0.3", features = ["modules"] }
+
+[workspace.dependencies.boost-ext]
+ut = "2.3.1"

@@ -1,0 +1,20 @@
+[package]
+namespace   = "ghacc"
+name        = "ghacc"
+version     = "0.1.0"
+description = "GitHub / Steam network accelerator CLI + TUI"
+license     = "MIT"
+standard    = "c++23"
+
+[dependencies]
+ghacc.accel = { path = "../../libs/accel" }
+
+# NOTE: mcpp's workspace inheritance (`.workspace = true`) copies only the
+# version/source, NOT `features`. The `modules` feature must therefore be
+# restated on this edge, otherwise FTXUI is built without its `ftxui` C++
+# module and `import ftxui;` fails with a missing `gcm.cache/ftxui.gcm`.
+[dependencies.compat]
+ftxui = { workspace = true, features = ["modules"] }
+
+[dev-dependencies.boost-ext]
+ut.workspace = true
