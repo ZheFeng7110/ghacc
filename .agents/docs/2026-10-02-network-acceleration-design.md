@@ -4,7 +4,7 @@
 
 将 `/tmp/SteamTools`（Watt Toolkit / Steam++）中 `BD.WTTS.Client.Plugins.Accelerator.ReverseProxy`
 的「网络加速」引擎提取出来，用 **C++23 + C++ 模块** 重写为跨平台 CLI/TUI 程序 `ghacc`，
-构建系统使用 **mcpp**（本机 `/home/naalo2/prjs/mcpp`，已装 2026.9.27.1）。
+构建系统使用 [**mcpp**](https://github.com/mcpp-community/mcpp)。
 
 - 内置加速目标：**GitHub**、**Steam**
 - 预留 provider 扩展接口，后续可添加更多加速目标
