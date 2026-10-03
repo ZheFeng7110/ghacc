@@ -8,6 +8,7 @@ standard    = "c++23"
 
 [dependencies]
 ghacc.accel = { path = "../../libs/accel" }
+mcpplibs.cmdline.workspace = true
 
 # NOTE: mcpp's workspace inheritance (`.workspace = true`) copies only the
 # version/source, NOT `features`. The `modules` feature must therefore be
