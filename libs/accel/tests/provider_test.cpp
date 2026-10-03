@@ -53,5 +53,25 @@ int main() {
         expect(github->provider_id == "github");
     };
 
+    "github coverage includes api and codeload"_test = [] {
+        auto registry = make_registry();
+        std::array<std::string, 1> enabled{"github"};
+        auto rules = registry.build_rules(enabled);
+        expect(rules.match("api.github.com").has_value());
+        expect(rules.match("codeload.github.com").has_value());
+        expect(rules.match("gist.github.com").has_value());
+        expect(rules.match("objects.githubusercontent.com").has_value());
+    };
+
+    "steam coverage includes stores and cdn"_test = [] {
+        auto registry = make_registry();
+        std::array<std::string, 1> enabled{"steam"};
+        auto rules = registry.build_rules(enabled);
+        expect(rules.match("cdn.steamstatic.com").has_value());
+        expect(rules.match("login.steampowered.com").has_value());
+        expect(rules.match("checkout.steampowered.com").has_value());
+        expect(rules.match("cdn.steamcontent.com").has_value());
+    };
+
     return 0;
 }

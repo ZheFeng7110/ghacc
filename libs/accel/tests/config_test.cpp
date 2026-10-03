@@ -77,6 +77,16 @@ int main() {
         expect(!parsed.has_value());
     };
 
+    "platform paths use the expected leaf names"_test = [] {
+        expect(default_config_path().filename() == std::filesystem::path("config.toml"));
+        expect(default_ca_dir().filename() == std::filesystem::path("ca"));
+        expect(default_log_path().filename() == std::filesystem::path("ghacc.log"));
+        expect(default_pid_path().filename() == std::filesystem::path("ghacc.pid"));
+        expect(default_cert_cache_dir().filename() == std::filesystem::path("certs"));
+        expect(!default_data_dir().empty());
+        expect(!default_state_dir().empty());
+    };
+
     "round trip preserves values"_test = [] {
         auto parsed = parse_config(sample);
         expect(parsed.has_value());
