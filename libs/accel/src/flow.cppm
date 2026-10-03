@@ -42,4 +42,33 @@ private:
     std::uint64_t total_write_ = 0;
 };
 
+/// A single proxied request, for the TUI/status tables.
+struct RequestRecord {
+    std::chrono::system_clock::time_point time;
+    std::string method;
+    std::string host;
+    std::string path;
+    int status = 0;
+    std::chrono::milliseconds duration{0};
+    std::string upstream;    // upstream IP actually connected to
+    bool accelerated = false; // matched an acceleration rule
+};
+
+/// Bounded, thread-safe ring buffer of recent requests.
+class RequestLog {
+public:
+    void add(RequestRecord record);
+
+    [[nodiscard]] std::vector<RequestRecord> tail(std::size_t count) const;
+
+    void clear();
+
+    [[nodiscard]] std::size_t size() const noexcept;
+
+private:
+    mutable std::mutex mutex_;
+    std::deque<RequestRecord> ring_;
+    std::size_t capacity_ = 512;
+};
+
 } // namespace ghacc::accel

@@ -220,15 +220,23 @@ asio = { version = "1.38.1", features = ["ssl"] }
   CLI `ghacc test <domain>` 实机验证通过（github.com → 20.205.243.166，111ms）
 - M3（部分）：`ca.authority`（OpenSSL 自签根 CA，落盘 `ca.crt`/`ca.key` 0600；
   按域名签发叶子证书，SAN/扩展齐全，含大小写不敏感缓存）
+- M3（完成）：`http.message`/`http.parser`/`http.writer`（HTTP/1.1 报文模型、增量解析、
+  Content-Length/Chunked 分帧、`ChunkedScanner`）；`net.tls`（服务端 `SSL_CTX` +
+  SNI 选证 + ALPN `http/1.1`、系统 CA 加载）；`engine`（http/https 监听、TLS MITM、
+  上游 DoH 择优连接、流式反向转发、`Block`/`fixed-ip`/`forward_destination`/`user_agent`、
+  `FlowAnalyzer` 统计与 `RequestLog` 请求日志）。详见
+  `.agents/docs/2026-10-03-m3-ca-mitm-engine.md`。
 
-测试：`mcpp test -p accel`（8 个）、`mcpp test -p ghacc`（1 个）全绿。
+测试：`mcpp test`（accel 10 个 + ghacc 1 个）全绿，其中 `http_test` 覆盖报文编解码与分块，
+`engine_test` 用回环明文/TLS 上游验证反向代理、403 拦截、TLS MITM 证书链与请求日志。
 
 ### 11.4 下一步
 
-- M3：`http`（HTTP/1.1 编解码）、`net.tls`（`SSL_CTX` + SNI 选证、ALPN=http/1.1）、
-  `engine` MITM 反向代理（80/443 监听、CONNECT 隧道）
-- M4：hosts / 系统代理 / PAC、正向代理 CONNECT
+- M4：`takeover.hosts`（标记块/备份/权限）、正向代理 CONNECT/absolute-URI（`engine.forward`）、
+  PAC、`takeover.system_proxy` 三平台
 - M5：CLI 子命令（cmdline）+ FTXUI 仪表盘
+- M3 未做：正向代理端口首字节 sniffing（普通 HTTP 与 CONNECT/TLS 共用端口）留待 M4；
+  `Tunnel` 规则当前按反向代理处理
 
 ## 12. 已知限制
 

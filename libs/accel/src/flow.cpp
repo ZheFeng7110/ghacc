@@ -50,4 +50,26 @@ void FlowAnalyzer::reset() {
     total_write_ = 0;
 }
 
+void RequestLog::add(RequestRecord record) {
+    std::lock_guard lock(mutex_);
+    if (ring_.size() >= capacity_) ring_.pop_front();
+    ring_.push_back(std::move(record));
+}
+
+std::vector<RequestRecord> RequestLog::tail(std::size_t count) const {
+    std::lock_guard lock(mutex_);
+    const std::size_t begin = count >= ring_.size() ? 0 : ring_.size() - count;
+    return {ring_.begin() + static_cast<std::ptrdiff_t>(begin), ring_.end()};
+}
+
+void RequestLog::clear() {
+    std::lock_guard lock(mutex_);
+    ring_.clear();
+}
+
+std::size_t RequestLog::size() const noexcept {
+    std::lock_guard lock(mutex_);
+    return ring_.size();
+}
+
 } // namespace ghacc::accel

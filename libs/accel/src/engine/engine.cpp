@@ -1,0 +1,616 @@
+module;
+
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+
+module ghacc.accel.engine;
+
+import std;
+import asio;
+import ghacc.accel.config;
+import ghacc.accel.flow;
+import ghacc.accel.log;
+import ghacc.accel.rule;
+import ghacc.accel.ca.authority;
+import ghacc.accel.net.resolver;
+import ghacc.accel.net.tls;
+import ghacc.accel.http.message;
+import ghacc.accel.http.parser;
+import ghacc.accel.http.writer;
+
+namespace ghacc::accel {
+
+namespace {
+
+using namespace std::chrono_literals;
+using http::BodyFraming;
+using http::BodyInfo;
+using http::Request;
+using http::Response;
+
+constexpr std::size_t kReadChunk = 64 * 1024;
+constexpr std::size_t kMaxHead = 64 * 1024;
+
+struct Pipeline {
+    RuleSet& rules;
+    DnsResolver& resolver;
+    FlowAnalyzer& flow;
+    RequestLog& requests;
+    asio::ssl::context& upstream_tls;
+    const EngineOptions& options;
+};
+
+// --- small string helpers -------------------------------------------------
+
+std::uint16_t parse_port(std::string_view text, std::uint16_t fallback) {
+    std::uint32_t value = 0;
+    const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (ec != std::errc{} || ptr != text.data() + text.size() || value == 0 || value > 65535) {
+        return fallback;
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
+/// Host part of a `Host` header / authority, without port and without brackets.
+std::string host_only(std::string_view value) {
+    if (!value.empty() && value.front() == '[') {
+        const auto end = value.find(']');
+        if (end != std::string_view::npos) return std::string(value.substr(1, end - 1));
+    }
+    const auto first = value.find(':');
+    if (first != std::string_view::npos && value.find(':', first + 1) == std::string_view::npos) {
+        value = value.substr(0, first);
+    }
+    return std::string(value);
+}
+
+std::uint16_t port_from_authority(std::string_view value, std::uint16_t fallback) {
+    if (value.empty()) return fallback;
+    if (value.front() == '[') {
+        const auto end = value.find(']');
+        if (end != std::string_view::npos && end + 1 < value.size() && value[end + 1] == ':') {
+            return parse_port(value.substr(end + 2), fallback);
+        }
+        return fallback;
+    }
+    const auto colon = value.rfind(':');
+    if (colon != std::string_view::npos && value.find(':') == colon) {
+        return parse_port(value.substr(colon + 1), fallback);
+    }
+    return fallback;
+}
+
+/// Reduce an absolute-form request target to origin-form.
+std::string to_origin_form(std::string_view target, bool& scheme_https) {
+    const auto scheme = target.find("://");
+    if (scheme == std::string_view::npos) return std::string(target);
+    scheme_https = http::iequals(target.substr(0, scheme), "https");
+    const auto path = target.find('/', scheme + 3);
+    return path == std::string_view::npos ? std::string("/") : std::string(target.substr(path));
+}
+
+// --- stream helpers -------------------------------------------------------
+
+template <class Stream>
+asio::awaitable<bool> write_all(Stream& stream, std::string_view data) {
+    if (data.empty()) co_return true;
+    std::error_code ec;
+    co_await asio::async_write(stream, asio::buffer(data.data(), data.size()),
+                               asio::redirect_error(asio::use_awaitable, ec));
+    co_return !ec;
+}
+
+/// Read until the CRLFCRLF that terminates a head; returns the head (without the
+/// delimiter) and leaves any body bytes already read in `buffer`.
+template <class Stream>
+asio::awaitable<std::optional<std::string>> read_head(Stream& stream, std::string& buffer) {
+    std::array<char, 16 * 1024> chunk{};
+    for (;;) {
+        const auto end = buffer.find("\r\n\r\n");
+        if (end != std::string::npos) {
+            std::string head = buffer.substr(0, end);
+            buffer.erase(0, end + 4);
+            co_return head;
+        }
+        if (buffer.size() > kMaxHead) co_return std::nullopt;
+        std::error_code ec;
+        const std::size_t n = co_await stream.async_read_some(
+            asio::buffer(chunk), asio::redirect_error(asio::use_awaitable, ec));
+        if (ec || n == 0) co_return std::nullopt;
+        buffer.append(chunk.data(), n);
+    }
+}
+
+template <class Stream>
+asio::awaitable<void> send_error(Stream& stream, int status, std::string_view reason) {
+    Response response;
+    response.status = status;
+    response.reason = std::string(reason);
+    response.headers.set("Content-Length", "0");
+    response.headers.set("Connection", "close");
+    co_await write_all(stream, http::serialize_response(response));
+}
+
+/// Forward exactly `length` bytes from `from` to `to`; `pending` holds body bytes
+/// already read from `from` alongside the request/response head.
+template <class From, class To>
+asio::awaitable<bool> relay_exact(From& from, To& to, std::string& pending, std::uint64_t length,
+                                  FlowAnalyzer& flow) {
+    std::array<char, kReadChunk> chunk{};
+    while (length > 0) {
+        if (!pending.empty()) {
+            const auto take =
+                static_cast<std::size_t>(std::min<std::uint64_t>(pending.size(), length));
+            if (!co_await write_all(to, std::string_view(pending).substr(0, take))) co_return false;
+            flow.on_flow(Direction::Write, take);
+            pending.erase(0, take);
+            length -= take;
+            continue;
+        }
+        std::error_code ec;
+        const std::size_t n = co_await from.async_read_some(
+            asio::buffer(chunk), asio::redirect_error(asio::use_awaitable, ec));
+        if (ec || n == 0) co_return false;
+        flow.on_flow(Direction::Read, n);
+        const auto take = static_cast<std::size_t>(std::min<std::uint64_t>(n, length));
+        if (!co_await write_all(to, std::string_view(chunk.data(), take))) co_return false;
+        flow.on_flow(Direction::Write, take);
+        if (take < n) pending.assign(chunk.data() + take, n - take);
+        length -= take;
+    }
+    co_return true;
+}
+
+template <class From, class To>
+asio::awaitable<void> relay_until_close(From& from, To& to, std::string& pending,
+                                        FlowAnalyzer& flow) {
+    if (!pending.empty()) {
+        if (!co_await write_all(to, pending)) co_return;
+        flow.on_flow(Direction::Write, pending.size());
+        pending.clear();
+    }
+    std::array<char, kReadChunk> chunk{};
+    for (;;) {
+        std::error_code ec;
+        const std::size_t n = co_await from.async_read_some(
+            asio::buffer(chunk), asio::redirect_error(asio::use_awaitable, ec));
+        if (ec || n == 0) co_return;
+        flow.on_flow(Direction::Read, n);
+        if (!co_await write_all(to, std::string_view(chunk.data(), n))) co_return;
+        flow.on_flow(Direction::Write, n);
+    }
+}
+
+/// Relay a chunked body verbatim, stopping when the terminating chunk is seen.
+template <class From, class To>
+asio::awaitable<bool> relay_chunked(From& from, To& to, std::string& pending,
+                                    FlowAnalyzer& flow) {
+    http::ChunkedScanner scanner;
+    auto forward = [&](std::string_view data) -> std::optional<std::size_t> {
+        const std::size_t consumed = scanner.consume(data);
+        if (scanner.failed()) return std::nullopt;
+        return consumed;
+    };
+
+    if (!pending.empty()) {
+        const auto consumed = forward(pending);
+        if (!consumed) co_return false;
+        if (!co_await write_all(to, std::string_view(pending).substr(0, *consumed))) co_return false;
+        flow.on_flow(Direction::Write, *consumed);
+        pending.erase(0, *consumed);
+        if (scanner.done()) co_return true;
+    }
+
+    std::array<char, kReadChunk> chunk{};
+    for (;;) {
+        std::error_code ec;
+        const std::size_t n = co_await from.async_read_some(
+            asio::buffer(chunk), asio::redirect_error(asio::use_awaitable, ec));
+        if (ec || n == 0) co_return false;
+        flow.on_flow(Direction::Read, n);
+        const auto consumed = forward(std::string_view(chunk.data(), n));
+        if (!consumed) co_return false;
+        if (!co_await write_all(to, std::string_view(chunk.data(), *consumed))) co_return false;
+        flow.on_flow(Direction::Write, *consumed);
+        if (*consumed < n) pending.assign(chunk.data() + *consumed, n - *consumed);
+        if (scanner.done()) co_return true;
+    }
+}
+
+/// Try ranked upstream addresses in order with a per-address timeout.
+asio::awaitable<std::optional<asio::ip::tcp::socket>> connect_best(
+    const std::vector<RankedAddress>& ranked, std::uint16_t port,
+    std::chrono::milliseconds timeout, std::string& chosen_ip) {
+    const auto executor = co_await asio::this_coro::executor;
+    for (const auto& entry : ranked) {
+        asio::ip::tcp::socket socket(executor);
+        asio::steady_timer timer(executor);
+        bool timed_out = false;
+        timer.expires_after(timeout);
+        timer.async_wait([&](const std::error_code& ec) {
+            if (!ec) {
+                timed_out = true;
+                std::error_code ignored;
+                socket.close(ignored);
+            }
+        });
+
+        std::error_code ec;
+        co_await socket.async_connect(asio::ip::tcp::endpoint(entry.address, port),
+                                      asio::redirect_error(asio::use_awaitable, ec));
+        timer.cancel();
+        if (!timed_out && !ec) {
+            chosen_ip = entry.address.to_string();
+            co_return socket;
+        }
+    }
+    co_return std::nullopt;
+}
+
+// --- request exchange -----------------------------------------------------
+
+struct ExchangeMeta {
+    std::string host;
+    std::string upstream_ip;
+    bool accelerated = false;
+    std::chrono::steady_clock::time_point started;
+};
+
+template <class ClientStream, class UpstreamStream>
+asio::awaitable<void> run_exchange(Pipeline& p, ClientStream& client, UpstreamStream& upstream,
+                                   std::string& client_buffer, const Request& request,
+                                   const BodyInfo& req_body, std::string out_head,
+                                   ExchangeMeta meta) {
+    if (!co_await write_all(upstream, out_head)) co_return;
+    p.flow.on_flow(Direction::Write, out_head.size());
+
+    switch (req_body.framing) {
+        case BodyFraming::ContentLength:
+            if (!co_await relay_exact(client, upstream, client_buffer, req_body.length, p.flow)) {
+                co_return;
+            }
+            break;
+        case BodyFraming::Chunked:
+            if (!co_await relay_chunked(client, upstream, client_buffer, p.flow)) co_return;
+            break;
+        case BodyFraming::None:
+        case BodyFraming::UntilClose:
+            break;
+    }
+
+    std::string upstream_buffer;
+    auto resp_head = co_await read_head(upstream, upstream_buffer);
+    if (!resp_head) co_return;
+    auto response = http::parse_response_head(*resp_head);
+    if (!response) {
+        co_await send_error(client, 502, "Bad Gateway");
+        co_return;
+    }
+
+    response->headers.remove("Connection");
+    response->headers.remove("Keep-Alive");
+    response->headers.remove("Proxy-Connection");
+    response->headers.set("Connection", "close");
+    const std::string resp_out = http::serialize_response(*response);
+    if (!co_await write_all(client, resp_out)) co_return;
+    p.flow.on_flow(Direction::Write, resp_out.size());
+
+    if (auto resp_body = http::response_body_info(request, *response)) {
+        switch (resp_body->framing) {
+            case BodyFraming::ContentLength:
+                co_await relay_exact(upstream, client, upstream_buffer, resp_body->length, p.flow);
+                break;
+            case BodyFraming::Chunked:
+                co_await relay_chunked(upstream, client, upstream_buffer, p.flow);
+                break;
+            case BodyFraming::UntilClose:
+                co_await relay_until_close(upstream, client, upstream_buffer, p.flow);
+                break;
+            case BodyFraming::None:
+                break;
+        }
+    }
+
+    RequestRecord record;
+    record.time = std::chrono::system_clock::now();
+    record.method = request.method;
+    record.host = meta.host;
+    record.path = request.target;
+    record.status = response->status;
+    record.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - meta.started);
+    record.upstream = meta.upstream_ip;
+    record.accelerated = meta.accelerated;
+    p.requests.add(std::move(record));
+
+    log_info("engine", request.method + " " + meta.host + request.target + " -> " +
+                          std::to_string(response->status));
+}
+
+template <class ClientStream>
+asio::awaitable<void> serve_connection(Pipeline& p, ClientStream& client, bool client_tls,
+                                       std::string sni) {
+    const auto started = std::chrono::steady_clock::now();
+    std::string client_buffer;
+    auto head = co_await read_head(client, client_buffer);
+    if (!head) co_return;
+
+    auto parsed = http::parse_request_head(*head);
+    if (!parsed) {
+        co_await send_error(client, 400, "Bad Request");
+        co_return;
+    }
+    Request request = std::move(*parsed);
+
+    bool target_https = false;
+    request.target = to_origin_form(request.target, target_https);
+    if (request.target.empty() || request.target.front() != '/') request.target = "/";
+
+    const auto host_header = request.headers.get("host");
+    const std::string authority = host_header ? std::string(*host_header) : sni;
+    const std::string host = http::lower_ascii(host_only(authority));
+    if (host.empty()) {
+        co_await send_error(client, 400, "Missing Host");
+        co_return;
+    }
+
+    const auto rule = p.rules.match(host);
+    if (rule && rule->action == RuleAction::Block) {
+        log_info("engine", "blocked " + host);
+        co_await send_error(client, 403, "Forbidden");
+        co_return;
+    }
+
+    auto body = http::request_body_info(request);
+    if (!body) {
+        co_await send_error(client, 400, "Bad Request");
+        co_return;
+    }
+
+    const bool upstream_tls = client_tls || target_https;
+    const std::uint16_t default_port =
+        upstream_tls ? p.options.upstream_https_port : p.options.upstream_http_port;
+    const std::uint16_t upstream_port = port_from_authority(authority, default_port);
+    const std::string upstream_host =
+        (rule && !rule->forward_destination.empty()) ? rule->forward_destination : host;
+
+    std::vector<RankedAddress> ranked;
+    if (rule && rule->ip) {
+        std::error_code ec;
+        auto address = asio::ip::make_address(*rule->ip, ec);
+        if (ec) {
+            co_await send_error(client, 502, "Bad Gateway");
+            co_return;
+        }
+        RankedAddress entry;
+        entry.address = address;
+        entry.reachable = true;
+        ranked.push_back(entry);
+    } else {
+        ranked = p.resolver.resolve_ranked(upstream_host, upstream_port);
+    }
+    if (ranked.empty()) {
+        log_warn("engine", "no upstream address for " + upstream_host);
+        co_await send_error(client, 502, "Bad Gateway");
+        co_return;
+    }
+
+    const auto timeout = rule ? rule->timeout : std::chrono::milliseconds{10000};
+    std::string upstream_ip;
+    auto socket = co_await connect_best(ranked, upstream_port, timeout, upstream_ip);
+    if (!socket) {
+        log_warn("engine", "cannot connect upstream " + upstream_host);
+        co_await send_error(client, 502, "Bad Gateway");
+        co_return;
+    }
+
+    Request outgoing = request;
+    outgoing.headers.set("Connection", "close");
+    outgoing.headers.remove("Proxy-Connection");
+    outgoing.headers.remove("Keep-Alive");
+    if (!outgoing.headers.contains("Host")) outgoing.headers.set("Host", authority);
+    if (rule && rule->user_agent) outgoing.headers.set("User-Agent", *rule->user_agent);
+    outgoing.version = "HTTP/1.1";
+    const std::string out_head = http::serialize_request(outgoing);
+
+    ExchangeMeta meta;
+    meta.host = host;
+    meta.upstream_ip = upstream_ip;
+    meta.accelerated = rule.has_value();
+    meta.started = started;
+
+    try {
+        if (upstream_tls) {
+            asio::ssl::stream<asio::ip::tcp::socket> upstream(std::move(*socket), p.upstream_tls);
+            if (SSL_set_tlsext_host_name(upstream.native_handle(), upstream_host.c_str()) != 1) {
+                co_await send_error(client, 502, "Bad Gateway");
+                co_return;
+            }
+            static constexpr unsigned char alpn_http11[] = {0x08, 'h', 't', 't', 'p', '/', '1',
+                                                            '.', '1'};
+            SSL_set_alpn_protos(upstream.native_handle(), alpn_http11, sizeof(alpn_http11));
+            const bool verify =
+                p.options.upstream_tls_verify && !(rule && rule->tls_ignore_name_mismatch);
+            if (verify) {
+                upstream.set_verify_callback(asio::ssl::host_name_verification(upstream_host));
+            } else {
+                SSL_set_verify(upstream.native_handle(), SSL_VERIFY_NONE, nullptr);
+            }
+
+            std::error_code ec;
+            co_await upstream.async_handshake(asio::ssl::stream_base::client,
+                                              asio::redirect_error(asio::use_awaitable, ec));
+            if (ec) {
+                log_warn("engine",
+                         "upstream TLS handshake failed for " + upstream_host + ": " + ec.message());
+                co_await send_error(client, 502, "Bad Gateway");
+                co_return;
+            }
+            co_await run_exchange(p, client, upstream, client_buffer, request, *body,
+                                  std::move(out_head), meta);
+            std::error_code shutdown_ec;
+            co_await upstream.async_shutdown(asio::redirect_error(asio::use_awaitable, shutdown_ec));
+        } else {
+            asio::ip::tcp::socket upstream = std::move(*socket);
+            co_await run_exchange(p, client, upstream, client_buffer, request, *body,
+                                  std::move(out_head), meta);
+        }
+    } catch (const std::exception& e) {
+        log_debug("engine", std::string("connection error: ") + e.what());
+    }
+}
+
+} // namespace
+
+struct ProxyEngine::Impl {
+    asio::io_context& io;
+    EngineOptions options;
+    RuleSet rules;
+    CertificateAuthority* ca;
+    FlowAnalyzer* flow;
+    RequestLog* requests;
+    std::unique_ptr<TlsServerContext> tls_server;
+    asio::ssl::context upstream_tls{asio::ssl::context::tls_client};
+    DnsResolver resolver;
+    std::vector<std::unique_ptr<asio::ip::tcp::acceptor>> acceptors;
+    std::vector<std::uint16_t> ports;
+    std::optional<asio::steady_timer> stop_timer;
+    std::atomic<bool> stopping{false};
+    std::atomic<bool> started{false};
+
+    Impl(asio::io_context& context, EngineOptions opts, RuleSet rule_set, CertificateAuthority& authority,
+         FlowAnalyzer& analyzer, RequestLog& log)
+        : io(context),
+          options(std::move(opts)),
+          rules(std::move(rule_set)),
+          ca(&authority),
+          flow(&analyzer),
+          requests(&log),
+          resolver(options.dns) {
+        load_system_ca(upstream_tls);
+        tls_server = std::make_unique<TlsServerContext>(*ca);
+    }
+
+    Pipeline pipeline() noexcept {
+        return Pipeline{rules, resolver, *flow, *requests, upstream_tls, options};
+    }
+
+    asio::awaitable<void> accept_loop(asio::ip::tcp::acceptor& acceptor, bool tls) {
+        for (;;) {
+            std::error_code ec;
+            auto socket = co_await acceptor.async_accept(
+                asio::redirect_error(asio::use_awaitable, ec));
+            if (ec) {
+                if (stopping.load() || ec == asio::error::operation_aborted) co_return;
+                continue;
+            }
+            if (stopping.load()) {
+                std::error_code ignored;
+                socket.close(ignored);
+                co_return;
+            }
+            if (tls) {
+                asio::co_spawn(io, handle_tls(std::move(socket)), asio::detached);
+            } else {
+                asio::co_spawn(io, handle_http(std::move(socket)), asio::detached);
+            }
+        }
+    }
+
+    asio::awaitable<void> handle_http(asio::ip::tcp::socket socket) {
+        auto p = pipeline();
+        try {
+            co_await serve_connection(p, socket, false, "");
+        } catch (const std::exception& e) {
+            log_debug("engine", std::string("http connection error: ") + e.what());
+        }
+    }
+
+    asio::awaitable<void> handle_tls(asio::ip::tcp::socket socket) {
+        auto p = pipeline();
+        try {
+            asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket),
+                                                            tls_server->context());
+            std::error_code ec;
+            co_await stream.async_handshake(asio::ssl::stream_base::server,
+                                            asio::redirect_error(asio::use_awaitable, ec));
+            if (ec) co_return;
+            const char* name = SSL_get_servername(stream.native_handle(), TLSEXT_NAMETYPE_host_name);
+            std::string sni = name != nullptr ? name : "";
+            co_await serve_connection(p, stream, true, std::move(sni));
+            std::error_code shutdown_ec;
+            co_await stream.async_shutdown(asio::redirect_error(asio::use_awaitable, shutdown_ec));
+        } catch (const std::exception& e) {
+            log_debug("engine", std::string("tls connection error: ") + e.what());
+        }
+    }
+};
+
+ProxyEngine::ProxyEngine(asio::io_context& io, EngineOptions options, RuleSet rules,
+                         CertificateAuthority& ca, FlowAnalyzer& flow, RequestLog& requests)
+    : impl_(std::make_unique<Impl>(io, std::move(options), std::move(rules), ca, flow, requests)) {}
+
+ProxyEngine::ProxyEngine(ProxyEngine&&) noexcept = default;
+ProxyEngine& ProxyEngine::operator=(ProxyEngine&&) noexcept = default;
+ProxyEngine::~ProxyEngine() = default;
+
+void ProxyEngine::start() {
+    if (impl_->started.exchange(true)) return;
+    const asio::ip::address address = asio::ip::make_address(impl_->options.listen_address);
+
+    const auto open_listener = [&](std::uint16_t port, bool tls) {
+        auto acceptor = std::make_unique<asio::ip::tcp::acceptor>(impl_->io);
+        const asio::ip::tcp::endpoint endpoint(address, port);
+        std::error_code ec;
+        acceptor->open(endpoint.protocol(), ec);
+        if (ec) throw std::system_error(ec, "open listener on port " + std::to_string(port));
+        acceptor->set_option(asio::socket_base::reuse_address(true), ec);
+        acceptor->bind(endpoint, ec);
+        if (ec) throw std::system_error(ec, "bind listener on port " + std::to_string(port));
+        acceptor->listen(asio::socket_base::max_listen_connections, ec);
+        if (ec) throw std::system_error(ec, "listen on port " + std::to_string(port));
+        impl_->ports.push_back(acceptor->local_endpoint().port());
+        asio::ip::tcp::acceptor* handle = acceptor.get();
+        impl_->acceptors.push_back(std::move(acceptor));
+        asio::co_spawn(impl_->io, impl_->accept_loop(*handle, tls), asio::detached);
+        log_info("engine", std::string(tls ? "https" : "http") + " listener on " +
+                              impl_->options.listen_address + ":" +
+                              std::to_string(impl_->ports.back()));
+    };
+
+    if (impl_->options.enable_http) open_listener(impl_->options.http_port, false);
+    if (impl_->options.enable_https) open_listener(impl_->options.https_port, true);
+}
+
+asio::awaitable<void> ProxyEngine::run() {
+    try {
+        start();
+    } catch (const std::exception& e) {
+        log_error("engine", std::string("cannot start: ") + e.what());
+        co_return;
+    }
+    impl_->stop_timer.emplace(co_await asio::this_coro::executor);
+    impl_->stop_timer->expires_at(std::chrono::steady_clock::time_point::max());
+    std::error_code ec;
+    co_await impl_->stop_timer->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+}
+
+void ProxyEngine::request_stop() {
+    if (impl_->stopping.exchange(true)) return;
+    auto* impl = impl_.get();
+    asio::post(impl->io, [impl] {
+        for (auto& acceptor : impl->acceptors) {
+            std::error_code ec;
+            acceptor->cancel(ec);
+        }
+        if (impl->stop_timer) impl->stop_timer->cancel();
+    });
+}
+
+bool ProxyEngine::running() const noexcept {
+    return impl_->started.load() && !impl_->stopping.load();
+}
+
+std::vector<std::uint16_t> ProxyEngine::listening_ports() const { return impl_->ports; }
+
+} // namespace ghacc::accel
