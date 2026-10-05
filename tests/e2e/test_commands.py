@@ -7,7 +7,10 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import time
+
+import pytest
 
 from helpers import free_port, run_ghacc
 
@@ -102,6 +105,10 @@ def test_help_mentions_new_commands(ghacc_bin):
         assert command in result.stdout
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="daemon mode is not supported on Windows; run ghacc as a service",
+)
 def test_daemon_start_and_stop(ghacc_bin, tmp_path):
     env = os.environ.copy()
     env["XDG_STATE_HOME"] = str(tmp_path / "state")

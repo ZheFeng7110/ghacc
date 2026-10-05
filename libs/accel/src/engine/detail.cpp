@@ -24,6 +24,7 @@ struct TunnelState {
     std::chrono::seconds timeout;
     asio::ip::tcp::socket* sockets[2]{nullptr, nullptr};
     bool closed = false;
+    int finished = 0;
 
     void close_all() {
         if (closed) return;
@@ -33,6 +34,20 @@ struct TunnelState {
             if (socket != nullptr) socket->close(ec);
         }
         timer.cancel();
+    }
+
+    /// Half-close `to`'s send side so its peer observes EOF, then tear the
+    /// tunnel down once both directions have drained.
+    ///
+    /// The sockets are *not* closed as soon as one direction ends: closing a
+    /// socket while the opposite direction still has a read pending makes
+    /// Windows abort the connection (RST) instead of sending a FIN, which the
+    /// peer sees as `ConnectionResetError` / `ECONNRESET`.
+    void finish_direction(asio::ip::tcp::socket& to) {
+        if (closed) return;
+        std::error_code ec;
+        to.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
+        if (++finished >= 2) close_all();
     }
 
     /// Cancel the pending idle wait so the supervisor re-arms a fresh timeout.
@@ -45,19 +60,32 @@ struct TunnelState {
 asio::awaitable<void> relay_direction(asio::ip::tcp::socket& from, asio::ip::tcp::socket& to,
                                       FlowAnalyzer& flow, std::shared_ptr<TunnelState> state) {
     std::array<char, kReadChunk> chunk{};
+    std::error_code read_ec;
     for (;;) {
         std::error_code ec;
         const std::size_t n = co_await from.async_read_some(
             asio::buffer(chunk), asio::redirect_error(asio::use_awaitable, ec));
-        if (ec || n == 0) break;
+        if (ec || n == 0) {
+            read_ec = ec;
+            break;
+        }
         flow.on_flow(Direction::Read, n);
         state->touch();
         co_await asio::async_write(to, asio::buffer(chunk.data(), n),
                                    asio::redirect_error(asio::use_awaitable, ec));
-        if (ec) break;
+        if (ec) {
+            read_ec = ec;
+            break;
+        }
         flow.on_flow(Direction::Write, n);
     }
-    state->close_all();
+    // A clean EOF (the peer half-closed) lets the other direction keep
+    // draining; any real error tears the whole tunnel down immediately.
+    if (!read_ec || read_ec == asio::error::eof) {
+        state->finish_direction(to);
+    } else {
+        state->close_all();
+    }
 }
 
 } // namespace
