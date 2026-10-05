@@ -1,5 +1,5 @@
 module;
-
+#define NOMINMAX
 #include <openssl/ssl.h>
 
 module ghacc.accel.engine;
